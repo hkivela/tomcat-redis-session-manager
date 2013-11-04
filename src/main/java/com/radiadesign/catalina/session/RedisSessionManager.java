@@ -28,6 +28,7 @@ import org.apache.juli.logging.LogFactory;
 public class RedisSessionManager extends ManagerBase implements Lifecycle {
 
   protected byte[] NULL_SESSION = "null".getBytes();
+  protected final int SESSIONID_RETRIES = 5;
 
   private final Log log = LogFactory.getLog(RedisSessionManager.class);
 
@@ -247,6 +248,7 @@ public class RedisSessionManager extends ManagerBase implements Lifecycle {
 
   @Override
   public Session createSession(String sessionId) {
+
     RedisSession session = (RedisSession)createEmptySession();
 
     // Initialize the properties of the new session and return it
@@ -260,19 +262,31 @@ public class RedisSessionManager extends ManagerBase implements Lifecycle {
     Boolean error = true;
     Jedis jedis = null;
 
+    boolean generateSessionId = true;
+    if(sessionId != null) {
+        generateSessionId = false;
+        if (jvmRoute != null) {
+            sessionId += '.' + jvmRoute;
+        }
+    }
+    long redisReply = 0;
     try {
       jedis = acquireConnection();
 
       // Ensure generation of a unique session identifier.
-      do {
-        if (null == sessionId) {
-          sessionId = generateSessionId();
-        }
-
-        if (jvmRoute != null) {
-          sessionId += '.' + jvmRoute;
-        }
-      } while (jedis.setnx(sessionId.getBytes(), NULL_SESSION) == 1L); // 1 = key set; 0 = key already existed
+      for(int i = 0; i < SESSIONID_RETRIES && generateSessionId && redisReply == 0L; i++) {
+            if(generateSessionId) {
+                sessionId = generateSessionId();
+                if (jvmRoute != null) {
+                    sessionId += '.' + jvmRoute;
+                }
+            }
+            redisReply = jedis.setnx(sessionId.getBytes(), NULL_SESSION); // 1 = key set; 0 = key already existed
+      }
+      if(redisReply == 0L) { // Session already existed in Redis
+          log.fatal("Failed creating new session with ID: " + sessionId);
+          return null;
+      }
 
       /* Even though the key is set in Redis, we are not going to flag
          the current thread as having had the session persisted since
